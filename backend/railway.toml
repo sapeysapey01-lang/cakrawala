@@ -1,0 +1,11 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "npm run build --workspace backend"
+watchPatterns = ["/backend/**", "/package.json", "/package-lock.json"]
+
+[deploy]
+startCommand = "npm run db:migrate:deploy --workspace backend && npm run start --workspace backend"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
