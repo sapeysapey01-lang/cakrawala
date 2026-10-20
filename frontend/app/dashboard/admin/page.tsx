@@ -193,6 +193,18 @@ export default function AdminDashboardPage() {
     }
   }
 
+  async function handleDeleteStudent(student: StudentItem) {
+    if (!window.confirm(`Hapus siswa ${student.name}? Akun dan seluruh data terkait siswa ini akan ikut dihapus.`)) return;
+
+    try {
+      await apiRequest(`/api/admin/students/${student.id}`, { method: 'DELETE' });
+      setMessage(`Siswa ${student.name} berhasil dihapus.`);
+      await refreshData();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Gagal menghapus siswa.');
+    }
+  }
+
   async function handleCreateStudent() {
     try {
       const classTarget = classes.find((item) => item.name === studentForm.classId)
@@ -554,7 +566,12 @@ export default function AdminDashboardPage() {
                     <p className="font-semibold">{item.name}</p>
                     <p className="text-xs text-slate-500">{item.nis} • {item.className ?? '-'}</p>
                   </div>
-                  <span className="text-xs text-slate-500">{item.username}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-500">{item.username}</span>
+                    <button type="button" onClick={() => void handleDeleteStudent(item)} className="bg-rose-600 text-white hover:bg-rose-700">
+                      Hapus
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
