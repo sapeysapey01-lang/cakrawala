@@ -7,7 +7,12 @@ import { prisma } from '../lib/prisma.js';
 import { hashPassword } from '../lib/password.js';
 import { socketState } from '../lib/socket-state.js';
 import { removeMaterialFile, saveMaterialFile } from '../lib/material-file-storage.js';
-import { removeExplanationImage, saveExplanationImage } from '../lib/tryout-explanation-storage.js';
+import {
+  removeExplanationImage,
+  removeQuestionImage,
+  saveExplanationImage,
+  saveQuestionImage
+} from '../lib/tryout-explanation-storage.js';
 
 const VALID_CLASS_NAMES = ['9A', '9B', '9C', '9D', '9E', '9F', '9G'];
 const CONFUSING_CHARS = '0oO1liI';
@@ -132,12 +137,15 @@ const tryoutSchema = z.object({
     z.object({
       type: z.enum(['SINGLE_CHOICE', 'MULTIPLE_CHOICE']).default('SINGLE_CHOICE'),
       text: z.string().min(2),
-      imageUrl: z.string().url().optional(),
+      imageUrl: z.string().optional().nullable(),
       options: z.array(z.string().min(1)).min(2),
       correctAnswer: z.string().min(1),
+      questionImageIndex: z.number().int().min(0).optional(),
       explanationImageIndex: z.number().int().min(0).optional(),
+      existingImageUrl: z.string().optional().nullable(),
+      existingExplanationImageUrl: z.string().optional().nullable(),
       points: z.number().int().positive().default(1),
-      explanation: z.string().optional()
+      explanation: z.string().optional().nullable()
     }).superRefine((question, context) => {
       if (question.type === 'SINGLE_CHOICE') {
         if (!question.options.includes(question.correctAnswer)) {
@@ -1466,6 +1474,7 @@ export async function getTryouts(req: Request, res: Response) {
       id: tryout.id,
       title: tryout.title,
       accessCode: tryout.accessCode,
+      classId: tryout.classId,
       durationMinutes: tryout.durationMinutes,
       startAt: tryout.startAt,
       endAt: tryout.endAt,
@@ -1477,6 +1486,55 @@ export async function getTryouts(req: Request, res: Response) {
       certificateSignerName: tryout.certificateSignerName ?? '',
       certificateSignerTitle: tryout.certificateSignerTitle ?? ''
     }))
+  });
+}
+
+export async function getTryoutDetail(req: Request, res: Response) {
+  const id = normalizeString(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID tryout tidak valid' });
+  }
+
+  const tryout = await prisma.tryout.findUnique({
+    where: { id },
+    include: {
+      class: true,
+      questions: { orderBy: { createdAt: 'asc' } }
+    }
+  });
+
+  if (!tryout) {
+    return res.status(404).json({ success: false, message: 'Tryout tidak ditemukan' });
+  }
+
+  return res.json({
+    success: true,
+    data: {
+      id: tryout.id,
+      title: tryout.title,
+      accessCode: tryout.accessCode,
+      classId: tryout.classId,
+      className: tryout.class.name,
+      durationMinutes: tryout.durationMinutes,
+      startAt: tryout.startAt,
+      endAt: tryout.endAt,
+      shuffleQuestions: tryout.shuffleQuestions,
+      certificateEnabled: tryout.certificateEnabled,
+      certificateMinimumScore: tryout.certificateMinimumScore,
+      certificateSignerName: tryout.certificateSignerName ?? '',
+      certificateSignerTitle: tryout.certificateSignerTitle ?? '',
+      questions: tryout.questions.map((question) => ({
+        id: question.id,
+        type: question.type,
+        text: question.text,
+        imageUrl: question.imageUrl,
+        options: Array.isArray(question.options) ? question.options : [],
+        correctAnswer: question.correctAnswer,
+        points: question.points,
+        explanation: question.explanation ?? '',
+        explanationImageUrl: question.explanationImageUrl
+      }))
+    }
   });
 }
 
@@ -1580,6 +1638,33 @@ export async function exportNewAccountCredentials(req: Request, res: Response) {
   return res.send(Buffer.from(file));
 }
 
+function detectImageExtension(file: Express.Multer.File): 'png' | 'jpg' | 'webp' | null {
+  if (!file.buffer || file.buffer.length < 8) return null;
+  if (file.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'png';
+  if (file.buffer[0] === 0xff && file.buffer[1] === 0xd8 && file.buffer[2] === 0xff) return 'jpg';
+  if (
+    file.buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    file.buffer.length >= 12 &&
+    file.buffer.toString('ascii', 8, 12) === 'WEBP'
+  ) return 'webp';
+  return null;
+}
+
+function exceedsTryoutUploadLimit(files: Express.Multer.File[]): boolean {
+  const maxUploadBytes = Number(process.env.UPLOAD_MAX_FILE_SIZE ?? 4 * 1024 * 1024);
+  return files.reduce((total, file) => total + file.size, 0) > maxUploadBytes;
+}
+
+function getImageExtensions(files: Express.Multer.File[]): Array<'png' | 'jpg' | 'webp'> | null {
+  const extensions: Array<'png' | 'jpg' | 'webp'> = [];
+  for (const file of files) {
+    const extension = detectImageExtension(file);
+    if (!extension) return null;
+    extensions.push(extension);
+  }
+  return extensions;
+}
+
 export async function createTryout(req: Request, res: Response) {
   let payload = req.body;
   if (typeof req.body.payload === 'string') {
@@ -1595,35 +1680,43 @@ export async function createTryout(req: Request, res: Response) {
     return res.status(400).json({ success: false, message: 'Data tryout tidak valid' });
   }
 
-  const images = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
-  const imageIndexes = parsed.data.questions.flatMap((question) =>
+  const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
+  if (exceedsTryoutUploadLimit(files)) {
+    return res.status(413).json({ success: false, message: 'Total ukuran gambar TryOut melebihi batas unggahan' });
+  }
+  if (files.some((file) => !['questionImages', 'explanationImages'].includes(file.fieldname))) {
+    return res.status(400).json({ success: false, message: 'Jenis file TryOut tidak valid' });
+  }
+  const questionFiles = files.filter((file) => file.fieldname === 'questionImages');
+  const explanationFiles = files.filter((file) => file.fieldname === 'explanationImages');
+  const questionIndexes = parsed.data.questions.flatMap((question) =>
+    question.questionImageIndex === undefined ? [] : [question.questionImageIndex]
+  );
+  const explanationIndexes = parsed.data.questions.flatMap((question) =>
     question.explanationImageIndex === undefined ? [] : [question.explanationImageIndex]
   );
   if (
-    imageIndexes.some((index) => index >= images.length) ||
-    new Set(imageIndexes).size !== imageIndexes.length ||
-    imageIndexes.length !== images.length
+    questionIndexes.length !== questionFiles.length ||
+    questionIndexes.some((index) => index >= questionFiles.length) ||
+    new Set(questionIndexes).size !== questionIndexes.length
+  ) {
+    return res.status(400).json({ success: false, message: 'Gambar soal tidak cocok dengan data soal' });
+  }
+  if (
+    explanationIndexes.length !== explanationFiles.length ||
+    explanationIndexes.some((index) => index >= explanationFiles.length) ||
+    new Set(explanationIndexes).size !== explanationIndexes.length
   ) {
     return res.status(400).json({ success: false, message: 'Gambar pembahasan tidak cocok dengan data soal' });
   }
 
-  const imageExtensions: string[] = [];
-  for (const image of images) {
-    const extension = image.mimetype === 'image/png'
-      && image.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-      ? 'png'
-      : image.mimetype === 'image/jpeg'
-        && image.buffer[0] === 0xff && image.buffer[1] === 0xd8 && image.buffer[2] === 0xff
-        ? 'jpg'
-        : image.mimetype === 'image/webp'
-          && image.buffer.toString('ascii', 0, 4) === 'RIFF'
-          && image.buffer.toString('ascii', 8, 12) === 'WEBP'
-          ? 'webp'
-          : null;
-    if (!extension) {
-      return res.status(400).json({ success: false, message: 'Gambar pembahasan harus berupa PNG, JPEG, atau WebP yang valid' });
-    }
-    imageExtensions.push(extension);
+  const questionExtensions = getImageExtensions(questionFiles);
+  if (!questionExtensions) {
+    return res.status(400).json({ success: false, message: 'Gambar soal harus berupa PNG, JPEG, atau WebP yang valid' });
+  }
+  const explanationExtensions = getImageExtensions(explanationFiles);
+  if (!explanationExtensions) {
+    return res.status(400).json({ success: false, message: 'Gambar pembahasan harus berupa PNG, JPEG, atau WebP yang valid' });
   }
 
   const { questions, ...tryoutPayload } = parsed.data;
@@ -1637,13 +1730,13 @@ export async function createTryout(req: Request, res: Response) {
     return res.status(500).json({ success: false, message: 'Kode akses TryOut gagal dibuat. Silakan coba lagi.' });
   }
 
-  const savedFilenames = imageExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
+  const savedQuestionFilenames = questionExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
+  const savedExplanationFilenames = explanationExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
   try {
-    if (images.length > 0) {
-      await Promise.all(images.map((image, index) =>
-        saveExplanationImage(savedFilenames[index], image.buffer)
-      ));
-    }
+    await Promise.all([
+      ...questionFiles.map((file, index) => saveQuestionImage(savedQuestionFilenames[index], file.buffer)),
+      ...explanationFiles.map((file, index) => saveExplanationImage(savedExplanationFilenames[index], file.buffer))
+    ]);
 
     const tryout = await prisma.tryout.create({
       data: {
@@ -1652,18 +1745,25 @@ export async function createTryout(req: Request, res: Response) {
         startAt: new Date(payload.startAt),
         endAt: new Date(payload.endAt),
         questions: {
-          create: questions.map((question) => ({
-            type: question.type,
-            text: question.text,
-            imageUrl: question.imageUrl ?? null,
-            options: question.options,
-            correctAnswer: question.correctAnswer,
-            points: question.points,
-            explanation: question.explanation ?? null,
-            explanationImageUrl: question.explanationImageIndex === undefined
+          create: questions.map((question) => {
+            const imageUrl = question.questionImageIndex === undefined
+              ? question.imageUrl ?? null
+              : `/api/content/tryout-questions/${savedQuestionFilenames[question.questionImageIndex]}`;
+            const explanationImageUrl = question.explanationImageIndex === undefined
               ? null
-              : `/api/content/tryout-explanations/${savedFilenames[question.explanationImageIndex]}`
-          }))
+              : `/api/content/tryout-explanations/${savedExplanationFilenames[question.explanationImageIndex]}`;
+
+            return {
+              type: question.type,
+              text: question.text,
+              imageUrl,
+              options: question.options,
+              correctAnswer: question.correctAnswer,
+              points: question.points,
+              explanation: question.explanation ?? null,
+              explanationImageUrl
+            };
+          })
         }
       },
       include: { class: true, questions: true }
@@ -1692,10 +1792,207 @@ export async function createTryout(req: Request, res: Response) {
       }
     });
   } catch (error) {
-    await Promise.all(savedFilenames.map((filename) => removeExplanationImage(filename)));
+    await Promise.all([
+      ...savedQuestionFilenames.map(removeQuestionImage),
+      ...savedExplanationFilenames.map(removeExplanationImage)
+    ]);
     console.error('Gagal membuat TryOut:', error);
     return res.status(500).json({ success: false, message: 'TryOut gagal disimpan. Periksa data lalu coba lagi.' });
   }
+}
+
+export async function updateTryout(req: Request, res: Response) {
+  const id = normalizeString(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID tryout tidak valid' });
+  }
+
+  const existing = await prisma.tryout.findUnique({
+    where: { id },
+    include: { questions: true }
+  });
+  if (!existing) {
+    return res.status(404).json({ success: false, message: 'Tryout tidak ditemukan' });
+  }
+
+  const attemptsCount = await prisma.tryoutAttempt.count({ where: { tryoutId: id } });
+  if (attemptsCount > 0) {
+    return res.status(409).json({
+      success: false,
+      message: 'Tryout tidak dapat diedit karena sudah memiliki riwayat pengerjaan siswa'
+    });
+  }
+
+  let payload = req.body;
+  if (typeof req.body.payload === 'string') {
+    try {
+      payload = JSON.parse(req.body.payload);
+    } catch {
+      return res.status(400).json({ success: false, message: 'Data TryOut tidak dapat dibaca' });
+    }
+  }
+
+  const parsed = tryoutSchema.safeParse(payload);
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, message: 'Data tryout tidak valid', errors: parsed.error.format() });
+  }
+
+  const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
+  if (exceedsTryoutUploadLimit(files)) {
+    return res.status(413).json({ success: false, message: 'Total ukuran gambar TryOut melebihi batas unggahan' });
+  }
+  if (files.some((file) => !['questionImages', 'explanationImages'].includes(file.fieldname))) {
+    return res.status(400).json({ success: false, message: 'Jenis file TryOut tidak valid' });
+  }
+  const questionFiles = files.filter((file) => file.fieldname === 'questionImages');
+  const explanationFiles = files.filter((file) => file.fieldname === 'explanationImages');
+  const questionIndexes = parsed.data.questions.flatMap((question) =>
+    question.questionImageIndex === undefined ? [] : [question.questionImageIndex]
+  );
+  const explanationIndexes = parsed.data.questions.flatMap((question) =>
+    question.explanationImageIndex === undefined ? [] : [question.explanationImageIndex]
+  );
+  if (
+    questionIndexes.length !== questionFiles.length ||
+    questionIndexes.some((index) => index >= questionFiles.length) ||
+    new Set(questionIndexes).size !== questionIndexes.length
+  ) {
+    return res.status(400).json({ success: false, message: 'Gambar soal tidak cocok dengan data soal' });
+  }
+  if (
+    explanationIndexes.length !== explanationFiles.length ||
+    explanationIndexes.some((index) => index >= explanationFiles.length) ||
+    new Set(explanationIndexes).size !== explanationIndexes.length
+  ) {
+    return res.status(400).json({ success: false, message: 'Gambar pembahasan tidak cocok dengan data soal' });
+  }
+
+  const questionExtensions = getImageExtensions(questionFiles);
+  if (!questionExtensions) {
+    return res.status(400).json({ success: false, message: 'Gambar soal harus berupa PNG, JPEG, atau WebP yang valid' });
+  }
+  const explanationExtensions = getImageExtensions(explanationFiles);
+  if (!explanationExtensions) {
+    return res.status(400).json({ success: false, message: 'Gambar pembahasan harus berupa PNG, JPEG, atau WebP yang valid' });
+  }
+
+  const existingQuestionImageUrls = new Set(existing.questions.map((question) => question.imageUrl).filter(Boolean));
+  const existingExplanationImageUrls = new Set(existing.questions.map((question) => question.explanationImageUrl).filter(Boolean));
+  for (const question of parsed.data.questions) {
+    if (question.existingImageUrl && !existingQuestionImageUrls.has(question.existingImageUrl)) {
+      return res.status(400).json({ success: false, message: 'Gambar soal tersimpan tidak valid' });
+    }
+    if (question.existingExplanationImageUrl && !existingExplanationImageUrls.has(question.existingExplanationImageUrl)) {
+      return res.status(400).json({ success: false, message: 'Gambar pembahasan tersimpan tidak valid' });
+    }
+  }
+
+  const savedQuestionFilenames = questionExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
+  const savedExplanationFilenames = explanationExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
+  const { questions, ...tryoutPayload } = parsed.data;
+  const newQuestionImageUrls = new Set<string>();
+  const newExplanationImageUrls = new Set<string>();
+
+  try {
+    await Promise.all([
+      ...questionFiles.map((file, index) => saveQuestionImage(savedQuestionFilenames[index], file.buffer)),
+      ...explanationFiles.map((file, index) => saveExplanationImage(savedExplanationFilenames[index], file.buffer))
+    ]);
+
+    const updatedQuestions = questions.map((question) => {
+      const imageUrl = question.questionImageIndex === undefined
+        ? question.existingImageUrl ?? question.imageUrl ?? null
+        : `/api/content/tryout-questions/${savedQuestionFilenames[question.questionImageIndex]}`;
+      const explanationImageUrl = question.explanationImageIndex === undefined
+        ? question.existingExplanationImageUrl ?? null
+        : `/api/content/tryout-explanations/${savedExplanationFilenames[question.explanationImageIndex]}`;
+      if (imageUrl) newQuestionImageUrls.add(imageUrl);
+      if (explanationImageUrl) newExplanationImageUrls.add(explanationImageUrl);
+
+      return {
+        type: question.type,
+        text: question.text,
+        imageUrl,
+        options: question.options,
+        correctAnswer: question.correctAnswer,
+        points: question.points,
+        explanation: question.explanation ?? null,
+        explanationImageUrl
+      };
+    });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.tryout.update({
+        where: { id },
+        data: {
+          ...tryoutPayload,
+          startAt: new Date(payload.startAt),
+          endAt: new Date(payload.endAt)
+        }
+      });
+      await tx.question.deleteMany({ where: { tryoutId: id } });
+      await tx.question.createMany({
+        data: updatedQuestions.map((question) => ({ tryoutId: id, ...question }))
+      });
+    });
+
+    const removedFiles = await Promise.allSettled(existing.questions.flatMap((question) => [
+      ...(question.imageUrl?.startsWith('/api/content/tryout-questions/')
+        && !newQuestionImageUrls.has(question.imageUrl)
+        ? [removeQuestionImage(question.imageUrl.split('/').pop()!)]
+        : []),
+      ...(question.explanationImageUrl?.startsWith('/api/content/tryout-explanations/')
+        && !newExplanationImageUrls.has(question.explanationImageUrl)
+        ? [removeExplanationImage(question.explanationImageUrl.split('/').pop()!)]
+        : [])
+    ]));
+    for (const result of removedFiles) {
+      if (result.status === 'rejected') console.error('Gagal membersihkan gambar TryOut lama:', result.reason);
+    }
+
+    return res.json({ success: true, message: 'Tryout dan soal berhasil diperbarui', data: { id } });
+  } catch (error) {
+    const cleanup = await Promise.allSettled([
+      ...savedQuestionFilenames.map(removeQuestionImage),
+      ...savedExplanationFilenames.map(removeExplanationImage)
+    ]);
+    for (const result of cleanup) {
+      if (result.status === 'rejected') console.error('Gagal membersihkan gambar TryOut baru:', result.reason);
+    }
+    console.error('Gagal memperbarui TryOut:', error);
+    return res.status(500).json({ success: false, message: 'TryOut gagal diperbarui. Periksa data lalu coba lagi.' });
+  }
+}
+
+export async function deleteTryout(req: Request, res: Response) {
+  const id = normalizeString(req.params.id);
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'ID tryout tidak valid' });
+  }
+
+  const existing = await prisma.tryout.findUnique({
+    where: { id },
+    include: { questions: true }
+  });
+  if (!existing) {
+    return res.status(404).json({ success: false, message: 'Tryout tidak ditemukan' });
+  }
+
+  await prisma.tryout.delete({ where: { id } });
+
+  const removedFiles = await Promise.allSettled(existing.questions.flatMap((question) => [
+    ...(question.imageUrl?.startsWith('/api/content/tryout-questions/')
+      ? [removeQuestionImage(question.imageUrl.split('/').pop()!)]
+      : []),
+    ...(question.explanationImageUrl?.startsWith('/api/content/tryout-explanations/')
+      ? [removeExplanationImage(question.explanationImageUrl.split('/').pop()!)]
+      : [])
+  ]));
+  for (const result of removedFiles) {
+    if (result.status === 'rejected') console.error('Gagal membersihkan gambar TryOut yang dihapus:', result.reason);
+  }
+
+  return res.json({ success: true, message: 'Tryout berhasil dihapus' });
 }
 
 export async function getTryoutMonitoring(req: Request, res: Response) {

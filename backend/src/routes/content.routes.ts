@@ -1,8 +1,14 @@
 import { Router } from 'express';
-import { getMaterialFile, getTryoutExplanationImage } from '../controllers/content.controller.js';
+import {
+  getMaterialFile,
+  getTryoutExplanationImage,
+  getTryoutQuestionImage
+} from '../controllers/content.controller.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
+
+router.get('/tryout-questions/:filename', getTryoutQuestionImage);
 
 router.use(requireAuth, requireRole(['ADMIN', 'GURU', 'SISWA']));
 router.get('/materials/:id/file', getMaterialFile);
