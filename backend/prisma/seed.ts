@@ -226,7 +226,7 @@ async function main() {
       durationMinutes: 45,
       startAt: new Date(Date.now() - 3600000),
       endAt: new Date(Date.now() + 86400000 * 2),
-      classId: classRoom.id,
+      classAssignments: { create: [{ classId: classRoom.id }] },
       shuffleQuestions: true,
       questions: {
         create: [

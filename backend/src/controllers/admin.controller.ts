@@ -127,7 +127,7 @@ const tryoutSchema = z.object({
   durationMinutes: z.number().int().positive(),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
-  classId: z.string().min(1),
+  classIds: z.array(z.string().min(1)).min(1).refine((classIds) => new Set(classIds).size === classIds.length),
   shuffleQuestions: z.boolean().optional().default(false),
   certificateEnabled: z.boolean().optional().default(true),
   certificateMinimumScore: z.number().min(0).max(100).optional().default(0),
@@ -1464,28 +1464,33 @@ export async function resetUserPassword(req: Request, res: Response) {
 
 export async function getTryouts(req: Request, res: Response) {
   const tryouts = await prisma.tryout.findMany({
-    include: { class: true, questions: true },
+    include: { classAssignments: { include: { class: true } }, questions: true },
     orderBy: { startAt: 'desc' }
   });
 
   return res.json({
     success: true,
-    data: tryouts.map((tryout) => ({
-      id: tryout.id,
-      title: tryout.title,
-      accessCode: tryout.accessCode,
-      classId: tryout.classId,
-      durationMinutes: tryout.durationMinutes,
-      startAt: tryout.startAt,
-      endAt: tryout.endAt,
-      className: tryout.class.name,
-      questionCount: tryout.questions.length,
-      shuffleQuestions: tryout.shuffleQuestions,
-      certificateEnabled: tryout.certificateEnabled,
-      certificateMinimumScore: tryout.certificateMinimumScore,
-      certificateSignerName: tryout.certificateSignerName ?? '',
-      certificateSignerTitle: tryout.certificateSignerTitle ?? ''
-    }))
+    data: tryouts.map((tryout) => {
+      const classes = tryout.classAssignments.map((assignment) => assignment.class);
+      return {
+        id: tryout.id,
+        title: tryout.title,
+        accessCode: tryout.accessCode,
+        classIds: classes.map((classRecord) => classRecord.id),
+        classNames: classes.map((classRecord) => classRecord.name),
+        classId: classes[0]?.id ?? '',
+        durationMinutes: tryout.durationMinutes,
+        startAt: tryout.startAt,
+        endAt: tryout.endAt,
+        className: classes.map((classRecord) => classRecord.name).join(', '),
+        questionCount: tryout.questions.length,
+        shuffleQuestions: tryout.shuffleQuestions,
+        certificateEnabled: tryout.certificateEnabled,
+        certificateMinimumScore: tryout.certificateMinimumScore,
+        certificateSignerName: tryout.certificateSignerName ?? '',
+        certificateSignerTitle: tryout.certificateSignerTitle ?? ''
+      };
+    })
   });
 }
 
@@ -1498,7 +1503,7 @@ export async function getTryoutDetail(req: Request, res: Response) {
   const tryout = await prisma.tryout.findUnique({
     where: { id },
     include: {
-      class: true,
+      classAssignments: { include: { class: true } },
       questions: { orderBy: { createdAt: 'asc' } }
     }
   });
@@ -1507,14 +1512,17 @@ export async function getTryoutDetail(req: Request, res: Response) {
     return res.status(404).json({ success: false, message: 'Tryout tidak ditemukan' });
   }
 
+  const classes = tryout.classAssignments.map((assignment) => assignment.class);
   return res.json({
     success: true,
     data: {
       id: tryout.id,
       title: tryout.title,
       accessCode: tryout.accessCode,
-      classId: tryout.classId,
-      className: tryout.class.name,
+      classIds: classes.map((classRecord) => classRecord.id),
+      classNames: classes.map((classRecord) => classRecord.name),
+      classId: classes[0]?.id ?? '',
+      className: classes.map((classRecord) => classRecord.name).join(', '),
       durationMinutes: tryout.durationMinutes,
       startAt: tryout.startAt,
       endAt: tryout.endAt,
@@ -1679,6 +1687,10 @@ export async function createTryout(req: Request, res: Response) {
   if (!parsed.success) {
     return res.status(400).json({ success: false, message: 'Data tryout tidak valid' });
   }
+  const classCount = await prisma.class.count({ where: { id: { in: parsed.data.classIds } } });
+  if (classCount !== parsed.data.classIds.length) {
+    return res.status(400).json({ success: false, message: 'Satu atau beberapa kelas yang dipilih tidak ditemukan' });
+  }
 
   const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
   if (exceedsTryoutUploadLimit(files)) {
@@ -1719,7 +1731,7 @@ export async function createTryout(req: Request, res: Response) {
     return res.status(400).json({ success: false, message: 'Gambar pembahasan harus berupa PNG, JPEG, atau WebP yang valid' });
   }
 
-  const { questions, ...tryoutPayload } = parsed.data;
+  const { questions, classIds, ...tryoutPayload } = parsed.data;
   let accessCode = '';
   for (let attempt = 0; attempt < 5; attempt += 1) {
     accessCode = Array.from(crypto.randomBytes(8), (byte) => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[byte & 31]).join('');
@@ -1741,6 +1753,7 @@ export async function createTryout(req: Request, res: Response) {
     const tryout = await prisma.tryout.create({
       data: {
         ...tryoutPayload,
+        classAssignments: { create: classIds.map((classId) => ({ classId })) },
         accessCode,
         startAt: new Date(payload.startAt),
         endAt: new Date(payload.endAt),
@@ -1766,14 +1779,15 @@ export async function createTryout(req: Request, res: Response) {
           })
         }
       },
-      include: { class: true, questions: true }
+      include: { classAssignments: { include: { class: true } }, questions: true }
     });
 
     if (socketState.io) {
       socketState.io.emit('tryout:opened', {
         id: tryout.id,
         title: tryout.title,
-        classId: tryout.classId,
+        classIds: tryout.classAssignments.map((assignment) => assignment.classId),
+        classId: tryout.classAssignments[0]?.classId ?? '',
         startAt: tryout.startAt,
         endAt: tryout.endAt,
         message: 'Tryout baru telah dibuka'
@@ -1836,6 +1850,10 @@ export async function updateTryout(req: Request, res: Response) {
   if (!parsed.success) {
     return res.status(400).json({ success: false, message: 'Data tryout tidak valid', errors: parsed.error.format() });
   }
+  const classCount = await prisma.class.count({ where: { id: { in: parsed.data.classIds } } });
+  if (classCount !== parsed.data.classIds.length) {
+    return res.status(400).json({ success: false, message: 'Satu atau beberapa kelas yang dipilih tidak ditemukan' });
+  }
 
   const files = Array.isArray(req.files) ? req.files as Express.Multer.File[] : [];
   if (exceedsTryoutUploadLimit(files)) {
@@ -1889,7 +1907,7 @@ export async function updateTryout(req: Request, res: Response) {
 
   const savedQuestionFilenames = questionExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
   const savedExplanationFilenames = explanationExtensions.map((extension) => `${crypto.randomUUID()}.${extension}`);
-  const { questions, ...tryoutPayload } = parsed.data;
+  const { questions, classIds, ...tryoutPayload } = parsed.data;
   const newQuestionImageUrls = new Set<string>();
   const newExplanationImageUrls = new Set<string>();
 
@@ -1926,6 +1944,10 @@ export async function updateTryout(req: Request, res: Response) {
         where: { id },
         data: {
           ...tryoutPayload,
+          classAssignments: {
+            deleteMany: {},
+            create: classIds.map((classId) => ({ classId }))
+          },
           startAt: new Date(payload.startAt),
           endAt: new Date(payload.endAt)
         }

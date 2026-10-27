@@ -24,6 +24,8 @@ type TryoutItem = {
   durationMinutes: number;
   startAt: string;
   endAt: string;
+  classIds: string[];
+  classNames: string[];
   classId?: string;
   className: string;
   questionCount: number;
@@ -37,6 +39,8 @@ type TryoutDetail = {
   id: string;
   title: string;
   accessCode: string;
+  classIds: string[];
+  classNames: string[];
   classId: string;
   className: string;
   durationMinutes: number;
@@ -87,7 +91,8 @@ function createQuestion(): QuestionDraft {
 export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
   const [tryouts, setTryouts] = useState<TryoutItem[]>([]);
   const [title, setTitle] = useState('');
-  const [classId, setClassId] = useState('');
+  const [classIds, setClassIds] = useState<string[]>([]);
+  const [classSelectionInitialized, setClassSelectionInitialized] = useState(false);
   const [durationMinutes, setDurationMinutes] = useState('60');
   const [certificateEnabled, setCertificateEnabled] = useState(true);
   const [certificateMinimumScore, setCertificateMinimumScore] = useState('0');
@@ -134,14 +139,17 @@ export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
   }, []);
 
   useEffect(() => {
-    if (!classId && classes[0]) setClassId(classes[0].id);
-  }, [classId, classes]);
+    if (!classSelectionInitialized && classes[0]) {
+      setClassIds([classes[0].id]);
+      setClassSelectionInitialized(true);
+    }
+  }, [classSelectionInitialized, classes]);
 
   function resetForm() {
     setEditingTryoutId(null);
     setTitle('');
     setDurationMinutes('60');
-    if (classes[0]) setClassId(classes[0].id);
+    setClassIds(classes[0] ? [classes[0].id] : []);
     const date = new Date();
     date.setMinutes(date.getMinutes() + 5);
     setStartAt(toDateTimeInput(date));
@@ -187,7 +195,8 @@ export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
       const data = response.data;
       setEditingTryoutId(data.id);
       setTitle(data.title);
-      setClassId(data.classId);
+      setClassSelectionInitialized(true);
+      setClassIds(data.classIds.length > 0 ? data.classIds : data.classId ? [data.classId] : []);
       setDurationMinutes(String(data.durationMinutes));
       setStartAt(toDateTimeInput(new Date(data.startAt)));
       setEndAt(toDateTimeInput(new Date(data.endAt)));
@@ -258,6 +267,11 @@ export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (classIds.length === 0) {
+      setMessage('Pilih minimal satu kelas untuk TryOut.');
+      return;
+    }
+
     setSaving(true);
     setMessage('');
 
@@ -303,7 +317,7 @@ export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
 
       formData.append('payload', JSON.stringify({
         title,
-        classId,
+        classIds,
         durationMinutes: Number(durationMinutes),
         startAt: new Date(startAt).toISOString(),
         endAt: new Date(endAt).toISOString(),
@@ -415,12 +429,32 @@ export default function TryoutsSection({ classes }: { classes: ClassItem[] }) {
             Nama TryOut
             <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Contoh: TryOut Matematika" className="mt-1 w-full" minLength={2} required />
           </label>
-          <label className="text-sm text-slate-600">
-            Kelas
-            <select value={classId} onChange={(event) => setClassId(event.target.value)} className="mt-1 w-full" required disabled={classes.length === 0}>
-              {classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
-          </label>
+          <fieldset className="rounded-xl border border-slate-200 p-3 text-sm text-slate-600" aria-required="true">
+            <legend className="px-1">Kelas</legend>
+            <p className="mb-2 text-xs text-slate-500">
+              Pilih satu atau beberapa kelas ({classIds.length} dipilih)
+            </p>
+            {classes.length === 0 ? (
+              <p className="text-xs text-slate-500">Belum ada kelas yang tersedia.</p>
+            ) : (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {classes.map((item) => (
+                  <label key={item.id} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={classIds.includes(item.id)}
+                      onChange={(event) => setClassIds((current) => event.target.checked
+                        ? [...current, item.id]
+                        : current.filter((classId) => classId !== item.id)
+                      )}
+                      className="h-4 w-4"
+                    />
+                    {item.name}
+                  </label>
+                ))}
+              </div>
+            )}
+          </fieldset>
           <label className="text-sm text-slate-600">
             Durasi (menit)
             <input type="number" min="1" value={durationMinutes} onChange={(event) => setDurationMinutes(event.target.value)} className="mt-1 w-full" required />

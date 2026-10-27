@@ -120,11 +120,11 @@ model Class {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  students        Student[]
-  schedules       Schedule[]
-  materials       Material[]
-  tryouts         Tryout[]
-  teacherSubjects TeacherSubject[]
+  students          Student[]
+  schedules         Schedule[]
+  materials         Material[]
+  tryoutAssignments TryoutClass[]
+  teacherSubjects   TeacherSubject[]
 }
 
 model Subject {
@@ -235,26 +235,34 @@ model DailyScore {
 }
 
 model Tryout {
-  id               String   @id @default(uuid())
-  title            String
-  accessCode       String   @unique
-  durationMinutes  Int
-  startAt          DateTime
-  endAt            DateTime
-  classId          String
-  shuffleQuestions Boolean  @default(false)
-  certificateEnabled Boolean @default(true)
-  certificateMinimumScore Float @default(0)
-  certificateSignerName String?
-  certificateSignerTitle String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  id                      String   @id @default(uuid())
+  title                   String
+  accessCode              String   @unique
+  durationMinutes         Int
+  startAt                 DateTime
+  endAt                   DateTime
+  shuffleQuestions        Boolean  @default(false)
+  certificateEnabled      Boolean  @default(true)
+  certificateMinimumScore Float    @default(0)
+  certificateSignerName   String?
+  certificateSignerTitle  String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
-  class     Class           @relation(fields: [classId], references: [id], onDelete: Cascade)
-  questions Question[]
-  attempts  TryoutAttempt[]
+  classAssignments TryoutClass[]
+  questions        Question[]
+  attempts         TryoutAttempt[]
+}
 
-  @@index([classId, startAt])
+model TryoutClass {
+  tryoutId String
+  classId  String
+
+  tryout Tryout @relation(fields: [tryoutId], references: [id], onDelete: Cascade)
+  class  Class  @relation(fields: [classId], references: [id], onDelete: Cascade)
+
+  @@id([tryoutId, classId])
+  @@index([classId])
 }
 
 model Question {

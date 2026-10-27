@@ -71,7 +71,9 @@ export async function getStudentDashboard(req: Request, res: Response) {
       scheduleCount: await prisma.schedule.count({ where: { classId: student.classId ?? '' } }),
       materialCount: await prisma.material.count({ where: { classId: student.classId ?? '' } }),
       videoCount: await prisma.material.count({ where: { classId: student.classId ?? '', type: 'VIDEO' } }),
-      tryoutCount: await prisma.tryout.count({ where: { classId: student.classId ?? '' } })
+      tryoutCount: await prisma.tryout.count({
+        where: { classAssignments: { some: { classId: student.classId ?? '' } } }
+      })
     }
   });
 }
@@ -174,7 +176,7 @@ export async function getStudentTryouts(req: Request, res: Response) {
   }
 
   const tryouts = await prisma.tryout.findMany({
-    where: { classId: student.classId ?? '' },
+    where: { classAssignments: { some: { classId: student.classId ?? '' } } },
     select: {
       id: true,
       title: true,
@@ -346,12 +348,15 @@ export async function startTryoutAttempt(req: Request, res: Response) {
     return res.status(400).json({ success: false, message: 'ID tryout tidak valid' });
   }
 
-  const tryout = await prisma.tryout.findUnique({
-    where: { id: tryoutId },
+  const tryout = await prisma.tryout.findFirst({
+    where: {
+      id: tryoutId,
+      classAssignments: { some: { classId: student.classId ?? '' } }
+    },
     include: { questions: true }
   });
 
-  if (!tryout || tryout.classId !== student.classId) {
+  if (!tryout) {
     return res.status(404).json({ success: false, message: 'Tryout tidak tersedia untuk kelas Anda' });
   }
 
