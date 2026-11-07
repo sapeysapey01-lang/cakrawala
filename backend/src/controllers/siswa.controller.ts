@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma.js';
 import { socketState } from '../lib/socket-state.js';
@@ -587,14 +588,22 @@ export async function submitTryoutAttempt(req: Request, res: Response) {
     }
   }
 
-  const submitted = await prisma.tryoutAttempt.update({
-    where: { id: attempt.id },
-    data: {
-      submittedAt: new Date(),
-      score,
-      status: 'SUBMITTED'
+  let submitted;
+  try {
+    submitted = await prisma.tryoutAttempt.update({
+      where: { id: attempt.id },
+      data: {
+        submittedAt: new Date(),
+        score,
+        status: 'SUBMITTED'
+      }
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return res.status(409).json({ success: false, message: 'Tryout ini sudah pernah disubmit' });
     }
-  });
+    throw error;
+  }
 
   if (socketState.io) {
     socketState.io.emit('tryout:submitted', {
