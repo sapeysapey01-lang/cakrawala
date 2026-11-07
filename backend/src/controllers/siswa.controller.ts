@@ -393,6 +393,18 @@ export async function startTryoutAttempt(req: Request, res: Response) {
     });
   }
 
+  const submitted = await prisma.tryoutAttempt.findFirst({
+    where: {
+      studentId: student.id,
+      tryoutId,
+      status: 'SUBMITTED'
+    }
+  });
+
+  if (submitted) {
+    return res.status(409).json({ success: false, message: 'Anda sudah pernah mengerjakan TryOut ini' });
+  }
+
   const attempt = await prisma.tryoutAttempt.create({
     data: {
       studentId: student.id,
